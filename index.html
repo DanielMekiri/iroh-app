@@ -32,11 +32,14 @@
       incomingAudioQueue: [],
       settings: JSON.parse(localStorage.getItem('iroh_settings') || '{"notifyOnSilent":true,"yesCommand":null}'),
       showAddContact: false,
+      showEditProfile: false,
       newContact: { name: '', photo: null },
       trainingMode: null,
       trainingContact: null,
       trainingRecordings: [],
-      currentTranscript: ''
+      trainingText: '',
+      currentTranscript: '',
+      pendingDelete: null
     };
     let recognition = null;
     let mediaRecorder = null;
@@ -73,7 +76,7 @@
       }
       if (state.screen === 'contacts' && !state.currentCall && !isCapturingCall) {
         for (const contact of state.contacts) {
-          if (contact.nameCommand && text.includes(contact.nameCommand.text.toLowerCase())) { startRecordingForCall(contact); return; }
+          if (contact.isActive && contact.nameCommand && text.includes(contact.nameCommand.targetText.toLowerCase())) { startRecordingForCall(contact); return; }
         }
       }
     }
@@ -122,7 +125,7 @@
           const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
           const audioUrl = URL.createObjectURL(audioBlob);
           stream.getTracks().forEach(track => track.stop());
-          state.trainingRecordings.push({ url: audioUrl, text: state.currentTranscript });
+          state.trainingRecordings.push({ url: audioUrl, timestamp: Date.now() });
           render();
         };
         mediaRecorder.start();
@@ -131,45 +134,70 @@
     }
     function stopTrainingRecording() { if (mediaRecorder && mediaRecorder.state === 'recording') { mediaRecorder.stop(); } }
     function saveTraining() {
-      if (state.trainingRecordings.length === 0) return;
-      const bestRecording = state.trainingRecordings[state.trainingRecordings.length - 1];
+      if (state.trainingRecordings.length === 0 || !state.trainingText) return;
+      const trainingData = { targetText: state.trainingText, recordings: state.trainingRecordings };
       if (state.trainingMode === 'name') {
         const contactIndex = state.contacts.findIndex(c => c.id === state.trainingContact.id);
-        state.contacts[contactIndex].nameCommand = bestRecording;
+        state.contacts[contactIndex].nameCommand = trainingData;
         localStorage.setItem('iroh_contacts', JSON.stringify(state.contacts));
       } else if (state.trainingMode === 'ending') {
         const contactIndex = state.contacts.findIndex(c => c.id === state.trainingContact.id);
-        state.contacts[contactIndex].endingCommand = bestRecording;
+        state.contacts[contactIndex].endingCommand = trainingData;
         localStorage.setItem('iroh_contacts', JSON.stringify(state.contacts));
       } else if (state.trainingMode === 'yes') {
-        state.settings.yesCommand = bestRecording;
+        state.settings.yesCommand = trainingData;
         localStorage.setItem('iroh_settings', JSON.stringify(state.settings));
       }
       state.trainingMode = null;
       state.trainingContact = null;
       state.trainingRecordings = [];
+      state.trainingText = '';
       state.screen = state.trainingMode === 'yes' ? 'settings' : 'contacts';
       render();
     }
-    function setupProfile(name, photoUrl) {
-      state.myProfile = { name, photo: photoUrl };
+    function setupProfile(name, email, photoUrl) {
+      state.myProfile = { name, email, photo: photoUrl };
       localStorage.setItem('iroh_profile', JSON.stringify(state.myProfile));
       state.screen = 'contacts';
       if (recognition) { try { recognition.start(); } catch(e) {} }
       render();
     }
+    function updateProfile(name, email, photoUrl) {
+      state.myProfile = { name, email, photo: photoUrl || state.myProfile.photo };
+      localStorage.setItem('iroh_profile', JSON.stringify(state.myProfile));
+      state.showEditProfile = false;
+      render();
+    }
     function addContact(name, photoUrl) {
-      const newContact = { id: Date.now(), name: name, photo: photoUrl, nameCommand: null, endingCommand: null };
+      const newContact = { id: Date.now(), name: name, photo: photoUrl, nameCommand: null, endingCommand: null, isActive: true };
       state.contacts.push(newContact);
       localStorage.setItem('iroh_contacts', JSON.stringify(state.contacts));
       state.showAddContact = false;
       state.trainingMode = 'name';
       state.trainingContact = newContact;
       state.trainingRecordings = [];
+      state.trainingText = '';
       state.screen = 'training';
       render();
     }
-    function removeContact(id) { state.contacts = state.contacts.filter(c => c.id !== id); localStorage.setItem('iroh_contacts', JSON.stringify(state.contacts)); render(); }
+    function confirmRemoveContact(id) {
+      state.pendingDelete = id;
+      render();
+    }
+    function removeContact(id) {
+      state.contacts = state.contacts.filter(c => c.id !== id);
+      localStorage.setItem('iroh_contacts', JSON.stringify(state.contacts));
+      state.pendingDelete = null;
+      render();
+    }
+    function toggleContactActive(id) {
+      const contact = state.contacts.find(c => c.id === id);
+      if (contact) {
+        contact.isActive = !contact.isActive;
+        localStorage.setItem('iroh_contacts', JSON.stringify(state.contacts));
+        render();
+      }
+    }
     function initiateCall(contact, notificationAudio) { state.currentCall = contact; state.screen = 'call'; state.isSpeakerOn = true; render(); }
     function simulateIncomingCall(contact) {
       state.incomingCall = contact;
@@ -184,58 +212,90 @@
     function declineCall() { state.incomingCall = null; state.incomingAudioQueue = []; state.screen = 'contacts'; render(); }
     function endCall() { state.currentCall = null; state.screen = 'contacts'; state.isMuted = false; state.isSpeakerOn = true; render(); }
     function toggleSetting(key) { state.settings[key] = !state.settings[key]; localStorage.setItem('iroh_settings', JSON.stringify(state.settings)); render(); }
+    function sendInvite(contactName) {
+      const inviteLink = 'https://iroh-app-invite.com/' + btoa(state.myProfile.email);
+      const appStoreLink = 'https://apps.apple.com/app/iroh';
+      const subject = encodeURIComponent(state.myProfile.name + ' wants to connect on iroH');
+      const body = encodeURIComponent('Hi ' + contactName + ',\n\n' + state.myProfile.name + ' invited you to connect on iroH - voice-first calling for your VIPs.\n\nClick here to connect: ' + inviteLink + '\n\nDon\'t have the app yet? Download it here:\niOS: ' + appStoreLink + '\n\nSee you on iroH!');
+      window.location.href = 'mailto:?subject=' + subject + '&body=' + body;
+    }
     function handleImageUpload(inputId, callback) {
       const input = document.getElementById(inputId);
       const file = input.files[0];
-      if (file) { const reader = new FileReader(); reader.onload = (e) => callback(e.target.result); reader.readAsDataURL(file); }
+      if (file) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const img = new Image();
+          img.onload = () => {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            const maxSize = 800;
+            let width = img.width;
+            let height = img.height;
+            if (width > height) {
+              if (width > maxSize) { height *= maxSize / width; width = maxSize; }
+            } else {
+              if (height > maxSize) { width *= maxSize / height; height = maxSize; }
+            }
+            canvas.width = width;
+            canvas.height = height;
+            ctx.drawImage(img, 0, 0, width, height);
+            callback(canvas.toDataURL('image/jpeg', 0.85));
+          };
+          img.src = e.target.result;
+        };
+        reader.readAsDataURL(file);
+      }
     }
-    function renderSetup() { return '<div class="min-h-screen flex items-center justify-center p-6 bg-yellow-400"><div class="bauhaus-card bg-white p-8 max-w-md w-full"><h1 class="bauhaus-title text-6xl text-center mb-8">iroH</h1><p class="text-center mb-6 text-gray-700">Set up your profile to start</p><input type="text" id="profileName" placeholder="Your Name" class="w-full p-4 border-3 border-black mb-4 text-lg"/><div class="mb-6"><label class="bauhaus-btn bg-red-500 text-white p-4 block text-center cursor-pointer mb-2">Upload Photo<input type="file" id="profilePhoto" accept="image/*" class="hidden"/></label><div id="photoPreview" class="text-center text-sm text-gray-600"></div></div><button onclick="createProfile()" class="bauhaus-btn bg-blue-600 text-white p-4 w-full" style="box-shadow: 6px 6px 0px #000;">Create Profile</button></div></div>'; }
+    function renderSetup() { return '<div class="min-h-screen flex items-center justify-center p-6 bg-yellow-400"><div class="bauhaus-card bg-white p-8 max-w-md w-full"><h1 class="bauhaus-title text-6xl text-center mb-8">iroH</h1><p class="text-center mb-6 text-gray-700">Set up your profile to start</p><input type="text" id="profileName" placeholder="Your Name" class="w-full p-4 border-3 border-black mb-4 text-lg"/><input type="email" id="profileEmail" placeholder="Your Email" class="w-full p-4 border-3 border-black mb-4 text-lg"/><div class="mb-6"><label class="bauhaus-btn bg-red-500 text-white p-4 block text-center cursor-pointer mb-2">Upload Photo (Optional)<input type="file" id="profilePhoto" accept="image/*" class="hidden"/></label><div id="photoPreview" class="text-center text-sm text-gray-600"></div></div><button onclick="createProfile()" class="bauhaus-btn bg-blue-600 text-white p-4 w-full" style="box-shadow: 6px 6px 0px #000;">Create Profile</button></div></div>'; }
     function renderContacts() {
       let html = '<div class="min-h-screen bg-yellow-400 p-4"><div class="max-w-md mx-auto"><div class="flex items-center justify-between mb-8"><h1 class="bauhaus-title text-5xl">iroH</h1><button onclick="state.screen=\'settings\'; render();" class="bauhaus-btn bg-white p-3" style="box-shadow: 4px 4px 0px #000;">⚙️</button></div>';
       if (state.myProfile) {
         html += '<div class="bauhaus-card bg-white p-4 mb-6"><div class="flex items-center gap-4">';
         if (state.myProfile.photo) { html += '<img src="' + state.myProfile.photo + '" class="w-16 h-16 geometric-circle border-3 border-black"/>'; } else { html += '<div class="w-16 h-16 geometric-circle bg-red-500 border-3 border-black"></div>'; }
-        html += '<div><p class="text-sm font-bold uppercase">Your Profile</p><p class="text-xl font-bold">' + state.myProfile.name + '</p></div></div></div>';
+        html += '<div class="flex-1"><p class="text-sm font-bold uppercase">Your Profile</p><p class="text-xl font-bold">' + state.myProfile.name + '</p></div><button onclick="state.showEditProfile=true; render();" class="bauhaus-btn bg-blue-500 text-white p-2 text-sm" style="box-shadow: 2px 2px 0px #000;">✏️</button></div></div>';
       }
       html += '<div class="bauhaus-card bg-white p-4 mb-4"><div class="flex items-center justify-between"><span class="font-bold uppercase text-sm">Always Listening</span><div class="w-3 h-3 bg-green-500 rounded-full recording-pulse"></div></div>';
       if (state.currentTranscript) { html += '<div class="mt-2 p-2 bg-gray-100 text-xs border-2 border-black">"' + state.currentTranscript + '"</div>'; }
       html += '</div>';
-      html += '<div class="flex items-center justify-between mb-4"><h2 class="bauhaus-title text-2xl">VIP Contacts</h2><button onclick="state.showAddContact = true; render();" class="bauhaus-btn bg-red-500 text-white p-3" style="box-shadow: 4px 4px 0px #000;">➕</button></div>';
+      html += '<div class="flex items-center justify-between mb-4"><h2 class="bauhaus-title text-2xl">CONTACTS</h2><button onclick="state.showAddContact = true; render();" class="bauhaus-btn bg-red-500 text-white p-3" style="box-shadow: 4px 4px 0px #000;">➕</button></div>';
       if (state.contacts.length === 0) { html += '<div class="bauhaus-card bg-white p-8 text-center"><p class="font-bold mb-2">No contacts yet</p><p class="text-sm text-gray-600">Add someone special</p></div>'; } else {
         html += '<div class="space-y-4">';
         state.contacts.forEach(contact => {
           html += '<div class="bauhaus-card bg-white p-4"><div class="flex items-center justify-between mb-3"><div class="flex items-center gap-3">';
           if (contact.photo) { html += '<img src="' + contact.photo + '" class="w-12 h-12 geometric-circle border-3 border-black"/>'; } else { html += '<div class="w-12 h-12 geometric-circle bg-blue-500 border-3 border-black"></div>'; }
           html += '<div><p class="font-bold text-lg">' + contact.name + '</p>';
-          if (contact.nameCommand) { html += '<p class="text-xs text-green-600">✓ Trained: "' + contact.nameCommand.text + '"</p>'; } else { html += '<p class="text-xs text-red-600">⚠ Not trained</p>'; }
-          html += '</div></div><button onclick="removeContact(' + contact.id + ')" class="bauhaus-btn bg-red-500 text-white p-2 text-sm" style="box-shadow: 2px 2px 0px #000;">❌</button></div>';
+          if (contact.nameCommand) { html += '<p class="text-xs text-green-600">✓ Trained: "' + contact.nameCommand.targetText + '"</p>'; } else { html += '<p class="text-xs text-red-600">⚠ Not trained</p>'; }
+          html += '</div></div><div class="flex gap-2"><button onclick="toggleContactActive(' + contact.id + ')" class="bauhaus-btn ' + (contact.isActive ? 'bg-green-500' : 'bg-gray-400') + ' text-white p-2 text-sm" style="box-shadow: 2px 2px 0px #000;">' + (contact.isActive ? '🔔' : '🔕') + '</button><button onclick="confirmRemoveContact(' + contact.id + ')" class="bauhaus-btn bg-red-500 text-white p-2 text-sm" style="box-shadow: 2px 2px 0px #000;">❌</button></div></div>';
           html += '<div class="grid grid-cols-2 gap-2">';
           html += '<button onclick=\'startTrainingFor(' + JSON.stringify(contact) + ', "name")\' class="bauhaus-btn ' + (contact.nameCommand ? 'bg-blue-200' : 'bg-blue-500 text-white') + ' p-2 text-xs" style="box-shadow: 2px 2px 0px #000;">' + (contact.nameCommand ? '🔄 Retrain Name' : '🎤 Train Name') + '</button>';
           html += '<button onclick=\'startTrainingFor(' + JSON.stringify(contact) + ', "ending")\' class="bauhaus-btn ' + (contact.endingCommand ? 'bg-green-200' : 'bg-green-500 text-white') + ' p-2 text-xs" style="box-shadow: 2px 2px 0px #000;">' + (contact.endingCommand ? '🔄 Retrain End' : '🎤 Train End') + '</button>';
-          html += '</div><button onclick=\'simulateIncomingCall(' + JSON.stringify(contact) + ')\' class="bauhaus-btn bg-yellow-300 p-2 text-xs w-full mt-2" style="box-shadow: 2px 2px 0px #000;">📲 Test Call</button></div>';
+          html += '</div><button onclick=\'sendInvite("' + contact.name + '")\' class="bauhaus-btn bg-purple-500 text-white p-2 text-xs w-full mt-2" style="box-shadow: 2px 2px 0px #000;">📧 Send Invite</button>';
+          html += '<button onclick=\'simulateIncomingCall(' + JSON.stringify(contact) + ')\' class="bauhaus-btn bg-yellow-300 p-2 text-xs w-full mt-2" style="box-shadow: 2px 2px 0px #000;">📲 Test Call</button></div>';
         });
         html += '</div>';
       }
       html += '</div></div>';
-      if (state.showAddContact) { html += '<div class="fixed inset-0 bg-black/80 flex items-center justify-center p-6 z-50"><div class="bauhaus-card bg-white p-6 max-w-sm w-full"><h2 class="bauhaus-title text-3xl mb-4">Add Contact</h2><input type="text" id="contactName" placeholder="Contact Name" class="w-full p-3 border-3 border-black mb-4"/><label class="bauhaus-btn bg-blue-500 text-white p-3 block text-center cursor-pointer mb-4">Upload Photo<input type="file" id="contactPhoto" accept="image/*" class="hidden"/></label><div class="flex gap-2"><button onclick="state.showAddContact = false; render();" class="bauhaus-btn bg-gray-300 p-3 flex-1" style="box-shadow: 3px 3px 0px #000;">Cancel</button><button onclick="saveNewContact()" class="bauhaus-btn bg-red-500 text-white p-3 flex-1" style="box-shadow: 3px 3px 0px #000;">Add</button></div></div></div>'; }
+      if (state.showAddContact) { html += '<div class="fixed inset-0 bg-black/80 flex items-center justify-center p-6 z-50"><div class="bauhaus-card bg-white p-6 max-w-sm w-full"><h2 class="bauhaus-title text-3xl mb-4">Add Contact</h2><input type="text" id="contactName" placeholder="Contact Name" class="w-full p-3 border-3 border-black mb-4"/><label class="bauhaus-btn bg-blue-500 text-white p-3 block text-center cursor-pointer mb-4">Upload Photo (Optional)<input type="file" id="contactPhoto" accept="image/*" class="hidden"/></label><div class="flex gap-2"><button onclick="state.showAddContact = false; render();" class="bauhaus-btn bg-gray-300 p-3 flex-1" style="box-shadow: 3px 3px 0px #000;">Cancel</button><button onclick="saveNewContact()" class="bauhaus-btn bg-red-500 text-white p-3 flex-1" style="box-shadow: 3px 3px 0px #000;">Add</button></div></div></div>'; }
+      if (state.showEditProfile) { html += '<div class="fixed inset-0 bg-black/80 flex items-center justify-center p-6 z-50"><div class="bauhaus-card bg-white p-6 max-w-sm w-full"><h2 class="bauhaus-title text-3xl mb-4">Edit Profile</h2><input type="text" id="editName" placeholder="Your Name" value="' + state.myProfile.name + '" class="w-full p-3 border-3 border-black mb-4"/><input type="email" id="editEmail" placeholder="Your Email" value="' + (state.myProfile.email || '') + '" class="w-full p-3 border-3 border-black mb-4"/><label class="bauhaus-btn bg-blue-500 text-white p-3 block text-center cursor-pointer mb-4">Change Photo<input type="file" id="editPhoto" accept="image/*" class="hidden"/></label><div class="flex gap-2"><button onclick="state.showEditProfile = false; render();" class="bauhaus-btn bg-gray-300 p-3 flex-1" style="box-shadow: 3px 3px 0px #000;">Cancel</button><button onclick="saveProfileEdit()" class="bauhaus-btn bg-blue-600 text-white p-3 flex-1" style="box-shadow: 3px 3px 0px #000;">Save</button></div></div></div>'; }
+      if (state.pendingDelete) { const contact = state.contacts.find(c => c.id === state.pendingDelete); html += '<div class="fixed inset-0 bg-black/80 flex items-center justify-center p-6 z-50"><div class="bauhaus-card bg-white p-6 max-w-sm w-full text-center"><h2 class="bauhaus-title text-2xl mb-4">Remove Contact?</h2><p class="mb-6">Permanently remove <strong>' + contact.name + '</strong>?</p><div class="flex gap-2"><button onclick="state.pendingDelete=null; render();" class="bauhaus-btn bg-gray-300 p-3 flex-1" style="box-shadow: 3px 3px 0px #000;">Keep</button><button onclick="removeContact(' + state.pendingDelete + ')" class="bauhaus-btn bg-red-600 text-white p-3 flex-1" style="box-shadow: 3px 3px 0px #000;">Remove</button></div></div></div>'; }
       return html;
     }
     function renderTraining() {
       const isRecording = mediaRecorder && mediaRecorder.state === 'recording';
       const trainingType = state.trainingMode === 'name' ? 'Name' : state.trainingMode === 'ending' ? 'Ending Phrase' : 'Yes Command';
-      const instruction = state.trainingMode === 'name' ? 'Say how you pronounce "' + state.trainingContact.name + '"' : state.trainingMode === 'ending' ? 'Say your ending phrase (e.g., "love you")' : 'Say "yes" as you naturally would';
+      const placeholder = state.trainingMode === 'name' ? 'e.g., ' + (state.trainingContact ? state.trainingContact.name : 'Sarah') : state.trainingMode === 'ending' ? 'e.g., love you' : 'yes';
       let html = '<div class="min-h-screen bg-red-500 p-6 flex items-center justify-center"><div class="bauhaus-card bg-white p-8 max-w-md w-full"><h2 class="bauhaus-title text-3xl mb-2">Train ' + trainingType + '</h2>';
       if (state.trainingContact) { html += '<p class="text-lg mb-6">For: ' + state.trainingContact.name + '</p>'; }
-      html += '<div class="bauhaus-card bg-yellow-100 p-4 mb-6"><p class="font-bold mb-2">Instructions:</p><p class="text-sm">' + instruction + '</p><p class="text-xs mt-2 text-gray-600">Record 2-3 times for best results</p></div>';
-      html += '<div class="text-center mb-6"><button onclick="' + (isRecording ? 'stopTrainingRecording()' : 'startTrainingRecording()') + '" class="bauhaus-btn ' + (isRecording ? 'bg-red-600 recording-pulse' : 'bg-blue-600') + ' text-white p-6 text-2xl w-32 h-32 rounded-full mx-auto" style="box-shadow: 8px 8px 0px #000;">' + (isRecording ? '⏹️' : '🎤') + '</button><p class="mt-4 font-bold">' + (isRecording ? 'Recording...' : 'Tap to Record') + '</p>';
-      if (state.currentTranscript && isRecording) { html += '<p class="text-sm mt-2 text-gray-700">"' + state.currentTranscript + '"</p>'; }
-      html += '</div>';
+      html += '<div class="bauhaus-card bg-yellow-100 p-4 mb-4"><p class="font-bold mb-2">Step 1: Enter the text</p><input type="text" id="trainingText" value="' + state.trainingText + '" placeholder="' + placeholder + '" class="w-full p-3 border-2 border-black" /></div>';
+      html += '<div class="bauhaus-card bg-blue-100 p-4 mb-6"><p class="font-bold mb-2">Step 2: Record 5-7 times</p><p class="text-sm">Press record, say the text ONCE clearly, then stop. Repeat 5-7 times for best results.</p></div>';
+      html += '<div class="text-center mb-6"><button onclick="' + (isRecording ? 'stopTrainingRecording()' : 'startTrainingRecording()') + '" ' + (!state.trainingText ? 'disabled' : '') + ' class="bauhaus-btn ' + (isRecording ? 'bg-red-600 recording-pulse' : 'bg-blue-600') + ' text-white p-6 text-2xl w-32 h-32 rounded-full mx-auto disabled:opacity-50" style="box-shadow: 8px 8px 0px #000;">' + (isRecording ? '⏹️' : '🎤') + '</button><p class="mt-4 font-bold">' + (isRecording ? 'Recording... Say it once!' : 'Tap to Record') + '</p></div>';
       if (state.trainingRecordings.length > 0) {
-        html += '<div class="bauhaus-card bg-green-100 p-4 mb-6"><p class="font-bold mb-2">✓ ' + state.trainingRecordings.length + ' Recording(s)</p>';
-        state.trainingRecordings.forEach((rec, i) => { html += '<div class="flex items-center justify-between py-2 border-b border-black/20"><span class="text-sm">' + (i + 1) + '. "' + rec.text + '"</span><button onclick="new Audio(\'' + rec.url + '\').play()" class="bauhaus-btn bg-blue-500 text-white px-3 py-1 text-xs" style="box-shadow: 2px 2px 0px #000;">▶️</button></div>'; });
+        html += '<div class="bauhaus-card bg-green-100 p-4 mb-6"><p class="font-bold mb-2">✓ ' + state.trainingRecordings.length + ' Recording(s)</p><p class="text-xs mb-2">' + (state.trainingRecordings.length >= 5 ? 'Great! You can save now or add more.' : 'Record ' + (5 - state.trainingRecordings.length) + ' more for best results') + '</p>';
+        state.trainingRecordings.forEach((rec, i) => { html += '<div class="flex items-center justify-between py-2 border-b border-black/20"><span class="text-sm">' + (i + 1) + '. Recording</span><button onclick="new Audio(\'' + rec.url + '\').play()" class="bauhaus-btn bg-blue-500 text-white px-3 py-1 text-xs" style="box-shadow: 2px 2px 0px #000;">▶️</button></div>'; });
         html += '</div>';
       }
-      html += '<div class="flex gap-2"><button onclick="state.trainingMode=null; state.trainingContact=null; state.trainingRecordings=[]; state.screen=\'contacts\'; render();" class="bauhaus-btn bg-gray-300 p-3 flex-1" style="box-shadow: 4px 4px 0px #000;">Cancel</button><button onclick="saveTraining()" ' + (state.trainingRecordings.length === 0 ? 'disabled' : '') + ' class="bauhaus-btn bg-green-500 text-white p-3 flex-1 disabled:opacity-50" style="box-shadow: 4px 4px 0px #000;">Save</button></div></div></div>';
+      html += '<div class="flex gap-2"><button onclick="state.trainingMode=null; state.trainingContact=null; state.trainingRecordings=[]; state.trainingText=\'\'; state.screen=\'contacts\'; render();" class="bauhaus-btn bg-gray-300 p-3 flex-1" style="box-shadow: 4px 4px 0px #000;">Cancel</button><button onclick="saveTraining()" ' + (state.trainingRecordings.length === 0 || !state.trainingText ? 'disabled' : '') + ' class="bauhaus-btn bg-green-500 text-white p-3 flex-1 disabled:opacity-50" style="box-shadow: 4px 4px 0px #000;">Save</button></div></div></div>';
       return html;
     }
     function renderIncoming() {
@@ -248,7 +308,7 @@
       return html;
     }
     function renderCall() {
-      const endPhrase = state.currentCall.endingCommand ? state.currentCall.endingCommand.text : 'ending phrase';
+      const endPhrase = state.currentCall.endingCommand ? state.currentCall.endingCommand.targetText : 'ending phrase';
       let html = '<div class="min-h-screen bg-green-500 flex flex-col items-center justify-between p-6"><div class="text-center mt-16"><div class="bauhaus-card bg-white text-black p-8">';
       if (state.currentCall.photo) { html += '<img src="' + state.currentCall.photo + '" class="w-32 h-32 mx-auto geometric-circle border-4 border-black mb-4"/>'; } else { html += '<div class="w-32 h-32 mx-auto geometric-circle bg-yellow-400 border-4 border-black mb-4"></div>'; }
       html += '<h2 class="bauhaus-title text-4xl mb-2">' + state.currentCall.name + '</h2><p class="text-xl font-bold text-green-600">Connected</p></div></div>';
@@ -262,7 +322,7 @@
       let html = '<div class="min-h-screen bg-yellow-400 p-6"><div class="max-w-md mx-auto"><div class="flex items-center mb-8"><button onclick="state.screen=\'contacts\'; render();" class="bauhaus-btn bg-white p-3 mr-4" style="box-shadow: 3px 3px 0px #000;">⬅️</button><h1 class="bauhaus-title text-4xl">Settings</h1></div>';
       html += '<div class="space-y-4"><div class="bauhaus-card bg-white p-4"><div class="flex items-center justify-between mb-2"><div><p class="font-bold">Notify on Silent</p><p class="text-sm text-gray-600">Hear calls when phone is silent</p></div><button onclick="toggleSetting(\'notifyOnSilent\')" class="w-16 h-8 ' + (state.settings.notifyOnSilent ? 'bg-green-500' : 'bg-gray-400') + ' border-3 border-black relative"><div class="w-6 h-6 bg-white border-3 border-black absolute top-0.5 transition-all ' + (state.settings.notifyOnSilent ? 'right-0.5' : 'left-0.5') + '"></div></button></div></div>';
       html += '<div class="bauhaus-card bg-white p-4"><div class="flex items-center justify-between"><div class="flex-1"><p class="font-bold mb-1">"Yes" Command</p><p class="text-sm text-gray-600 mb-2">Train how you say "yes" to accept calls</p>';
-      if (state.settings.yesCommand) { html += '<p class="text-xs text-green-600">✓ Trained: "' + state.settings.yesCommand.text + '"</p>'; } else { html += '<p class="text-xs text-red-600">⚠ Not trained yet</p>'; }
+      if (state.settings.yesCommand) { html += '<p class="text-xs text-green-600">✓ Trained: "' + state.settings.yesCommand.targetText + '"</p>'; } else { html += '<p class="text-xs text-red-600">⚠ Not trained yet</p>'; }
       html += '</div><button onclick="startTrainingFor(null, \'yes\')" class="bauhaus-btn ' + (state.settings.yesCommand ? 'bg-blue-200' : 'bg-blue-500 text-white') + ' p-3" style="box-shadow: 3px 3px 0px #000;">🎤</button></div></div>';
       html += '<div class="bauhaus-card bg-white p-4"><p class="font-bold mb-2">About iroH</p><p class="text-sm text-gray-700 mb-2">Voice-first calling for your VIPs</p><p class="text-xs text-gray-500">Version 2.0 - Bauhaus Edition</p></div></div></div></div>';
       return html;
@@ -284,23 +344,39 @@
         if (profilePhoto) { profilePhoto.onchange = () => handleImageUpload('profilePhoto', (url) => { document.getElementById('photoPreview').innerHTML = '✓ Photo selected'; }); }
         const contactPhoto = document.getElementById('contactPhoto');
         if (contactPhoto) { contactPhoto.onchange = () => handleImageUpload('contactPhoto', () => {}); }
+        const editPhoto = document.getElementById('editPhoto');
+        if (editPhoto) { editPhoto.onchange = () => handleImageUpload('editPhoto', () => {}); }
+        const trainingTextInput = document.getElementById('trainingText');
+        if (trainingTextInput) { trainingTextInput.oninput = (e) => { state.trainingText = e.target.value; }; }
       }, 0);
     }
     window.createProfile = function() {
       const name = document.getElementById('profileName').value;
+      const email = document.getElementById('profileEmail').value;
       const photoInput = document.getElementById('profilePhoto');
       if (!name) { alert('Please enter your name'); return; }
-      if (photoInput.files[0]) { handleImageUpload('profilePhoto', (url) => setupProfile(name, url)); } else { setupProfile(name, null); }
+      if (!email) { alert('Please enter your email'); return; }
+      if (photoInput && photoInput.files && photoInput.files[0]) { handleImageUpload('profilePhoto', (url) => setupProfile(name, email, url)); } else { setupProfile(name, email, null); }
     };
     window.saveNewContact = function() {
       const name = document.getElementById('contactName').value;
       const photoInput = document.getElementById('contactPhoto');
       if (!name) { alert('Please enter contact name'); return; }
-      if (photoInput.files[0]) { handleImageUpload('contactPhoto', (url) => addContact(name, url)); } else { addContact(name, null); }
+      if (photoInput && photoInput.files && photoInput.files[0]) { handleImageUpload('contactPhoto', (url) => addContact(name, url)); } else { addContact(name, null); }
     };
-    window.startTrainingFor = function(contact, mode) { state.trainingMode = mode; state.trainingContact = contact; state.trainingRecordings = []; state.screen = 'training'; render(); };
+    window.saveProfileEdit = function() {
+      const name = document.getElementById('editName').value;
+      const email = document.getElementById('editEmail').value;
+      const photoInput = document.getElementById('editPhoto');
+      if (!name) { alert('Please enter your name'); return; }
+      if (!email) { alert('Please enter your email'); return; }
+      if (photoInput && photoInput.files && photoInput.files[0]) { handleImageUpload('editPhoto', (url) => updateProfile(name, email, url)); } else { updateProfile(name, email, null); }
+    };
+    window.startTrainingFor = function(contact, mode) { state.trainingMode = mode; state.trainingContact = contact; state.trainingRecordings = []; state.trainingText = ''; state.screen = 'training'; render(); };
     window.handleVoiceCommand = handleVoiceCommand;
     window.removeContact = removeContact;
+    window.confirmRemoveContact = confirmRemoveContact;
+    window.toggleContactActive = toggleContactActive;
     window.simulateIncomingCall = simulateIncomingCall;
     window.acceptCall = acceptCall;
     window.declineCall = declineCall;
@@ -309,6 +385,7 @@
     window.startTrainingRecording = startTrainingRecording;
     window.stopTrainingRecording = stopTrainingRecording;
     window.saveTraining = saveTraining;
+    window.sendInvite = sendInvite;
     render();
   </script>
 </body>
