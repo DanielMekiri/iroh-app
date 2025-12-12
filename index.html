@@ -364,107 +364,7 @@
       let html = '<div class="min-h-screen bg-yellow-400 p-4"><div class="max-w-md mx-auto"><div class="flex items-center justify-between mb-8"><h1 class="bauhaus-title text-5xl">iroH</h1><button onclick="state.screen=\'settings\'; render();" class="bauhaus-btn bg-white p-3" style="box-shadow: 4px 4px 0px #000;">⚙️</button></div>';
       
       if (state.myProfile) {
-        html += '<div class="bauhaus-card bg-white p-4"><p class="font-bold mb-2">About iroH</p><p class="text-sm text-gray-700 mb-2">Voice-first calling for your VIPs</p><p class="text-xs text-gray-500">Version 2.0 - Bauhaus Edition</p></div></div></div></div>';
-      return html;
-    }
-
-    function render() {
-      const app = document.getElementById('app');
-      let html = '';
-
-      switch (state.screen) {
-        case 'setup':
-          html = renderSetup();
-          break;
-        case 'contacts':
-          html = renderContacts();
-          break;
-        case 'training':
-          html = renderTraining();
-          break;
-        case 'incoming':
-          html = renderIncoming();
-          break;
-        case 'call':
-          html = renderCall();
-          break;
-        case 'settings':
-          html = renderSettings();
-          break;
-      }
-
-      app.innerHTML = html;
-
-      setTimeout(() => {
-        const profilePhoto = document.getElementById('profilePhoto');
-        if (profilePhoto) {
-          profilePhoto.onchange = () => handleImageUpload('profilePhoto', (url) => {
-            document.getElementById('photoPreview').innerHTML = '✓ Photo selected';
-          });
-        }
-
-        const contactPhoto = document.getElementById('contactPhoto');
-        if (contactPhoto) {
-          contactPhoto.onchange = () => handleImageUpload('contactPhoto', () => {});
-        }
-      }, 0);
-    }
-
-    window.createProfile = function() {
-      const name = document.getElementById('profileName').value;
-      const photoInput = document.getElementById('profilePhoto');
-      
-      if (!name) {
-        alert('Please enter your name');
-        return;
-      }
-
-      if (photoInput.files[0]) {
-        handleImageUpload('profilePhoto', (url) => setupProfile(name, url));
-      } else {
-        setupProfile(name, null);
-      }
-    };
-
-    window.saveNewContact = function() {
-      const name = document.getElementById('contactName').value;
-      const photoInput = document.getElementById('contactPhoto');
-      
-      if (!name) {
-        alert('Please enter contact name');
-        return;
-      }
-
-      if (photoInput.files[0]) {
-        handleImageUpload('contactPhoto', (url) => addContact(name, url));
-      } else {
-        addContact(name, null);
-      }
-    };
-
-    window.startTrainingFor = function(contact, mode) {
-      state.trainingMode = mode;
-      state.trainingContact = contact;
-      state.trainingRecordings = [];
-      state.screen = 'training';
-      render();
-    };
-
-    window.handleVoiceCommand = handleVoiceCommand;
-    window.removeContact = removeContact;
-    window.simulateIncomingCall = simulateIncomingCall;
-    window.acceptCall = acceptCall;
-    window.declineCall = declineCall;
-    window.endCall = endCall;
-    window.toggleSetting = toggleSetting;
-    window.startTrainingRecording = startTrainingRecording;
-    window.stopTrainingRecording = stopTrainingRecording;
-    window.saveTraining = saveTraining;
-
-    render();
-  </script>
-</body>
-</html>d bg-white p-4 mb-6"><div class="flex items-center gap-4">';
+        html += '<div class="bauhaus-card bg-white p-4 mb-6"><div class="flex items-center gap-4">';
         if (state.myProfile.photo) {
           html += '<img src="' + state.myProfile.photo + '" class="w-16 h-16 geometric-circle border-3 border-black"/>';
         } else {
@@ -588,4 +488,99 @@
         html += '<p class="text-xs text-red-600">⚠ Not trained yet</p>';
       }
       html += '</div><button onclick="startTrainingFor(null, \'yes\')" class="bauhaus-btn ' + (state.settings.yesCommand ? 'bg-blue-200' : 'bg-blue-500 text-white') + ' p-3" style="box-shadow: 3px 3px 0px #000;">🎤</button></div></div>';
-      html += '<div class="bauhaus-car
+      html += '<div class="bauhaus-card bg-white p-4"><p class="font-bold mb-2">About iroH</p><p class="text-sm text-gray-700 mb-2">Voice-first calling for your VIPs</p><p class="text-xs text-gray-500">Version 2.0 - Bauhaus Edition</p></div></div></div></div>';
+      return html;
+      function render() {
+  const app = document.getElementById('app');
+  let html = '';
+
+  switch (state.screen) {
+    case 'setup':
+      html = renderSetup();
+      break;
+    case 'contacts':
+      html = renderContacts();
+      break;
+    case 'training':
+      html = renderTraining();
+      break;
+    case 'incoming':
+      html = renderIncoming();
+      break;
+    case 'call':
+      html = renderCall();
+      break;
+    case 'settings':
+      html = renderSettings();
+      break;
+  }
+
+  app.innerHTML = html;
+
+  setTimeout(() => {
+    const profilePhoto = document.getElementById('profilePhoto');
+    if (profilePhoto) {
+      profilePhoto.onchange = () => handleImageUpload('profilePhoto', (url) => {
+        document.getElementById('photoPreview').innerHTML = '✓ Photo selected';
+      });
+    }
+
+    const contactPhoto = document.getElementById('contactPhoto');
+    if (contactPhoto) {
+      contactPhoto.onchange = () => handleImageUpload('contactPhoto', () => {});
+    }
+  }, 0);
+}
+
+window.createProfile = function() {
+  const name = document.getElementById('profileName').value;
+  const photoInput = document.getElementById('profilePhoto');
+  
+  if (!name) {
+    alert('Please enter your name');
+    return;
+  }
+
+  if (photoInput.files[0]) {
+    handleImageUpload('profilePhoto', (url) => setupProfile(name, url));
+  } else {
+    setupProfile(name, null);
+  }
+};
+
+window.saveNewContact = function() {
+  const name = document.getElementById('contactName').value;
+  const photoInput = document.getElementById('contactPhoto');
+  
+  if (!name) {
+    alert('Please enter contact name');
+    return;
+  }
+
+  if (photoInput.files[0]) {
+    handleImageUpload('contactPhoto', (url) => addContact(name, url));
+  } else {
+    addContact(name, null);
+  }
+};
+
+window.startTrainingFor = function(contact, mode) {
+  state.trainingMode = mode;
+  state.trainingContact = contact;
+  state.trainingRecordings = [];
+  state.screen = 'training';
+  render();
+};
+
+window.handleVoiceCommand = handleVoiceCommand;
+window.removeContact = removeContact;
+window.simulateIncomingCall = simulateIncomingCall;
+window.acceptCall = acceptCall;
+window.declineCall = declineCall;
+window.endCall = endCall;
+window.toggleSetting = toggleSetting;
+window.startTrainingRecording = startTrainingRecording;
+window.stopTrainingRecording = stopTrainingRecording;
+window.saveTraining = saveTraining;
+
+render();
