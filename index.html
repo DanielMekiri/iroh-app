@@ -6,130 +6,309 @@
   <title>iroH</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    body {
-      font-family: 'Roboto', sans-serif;
-    }
-    .container {
-      max-width: 600px;
-      margin: 0 auto;
-      padding: 16px;
-      text-align: center;
-    }
+    @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Roboto:wght@300;400;700&display=swap');
+    body { overscroll-behavior: none; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; font-family: 'Roboto', sans-serif; }
+    .bauhaus-title { font-family: 'Bebas Neue', sans-serif; letter-spacing: 0.05em; }
+    .bauhaus-card { border: 3px solid #000; box-shadow: 8px 8px 0px #000; }
+    .bauhaus-btn { border: 3px solid #000; transition: all 0.2s; font-weight: 700; text-transform: uppercase; }
+    .bauhaus-btn:active { transform: translate(4px, 4px); box-shadow: none; }
+    .recording-pulse { animation: pulse 1s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    .geometric-circle { clip-path: circle(50%); }
   </style>
 </head>
 <body class="bg-white min-h-screen">
   <div id="app"></div>
-
   <script>
-    // ----------- STATE -----------
     let state = {
-      screen: 'setup', // Initial screen for the app
-      myProfile: null, // Profile setup is empty initially
-      contacts: [],
+      screen: 'setup',
+      myProfile: JSON.parse(localStorage.getItem('iroh_profile') || 'null'),
+      contacts: JSON.parse(localStorage.getItem('iroh_contacts') || '[]'),
+      isListening: true,
+      isMuted: false,
+      isSpeakerOn: true,
+      currentCall: null,
+      incomingCall: null,
+      incomingAudioQueue: [],
+      settings: JSON.parse(localStorage.getItem('iroh_settings') || '{"notifyOnSilent":true,"yesCommand":null}'),
+      showAddContact: false,
+      newContact: { name: '', photo: null },
+      trainingMode: null,
+      trainingContact: null,
+      trainingRecordings: [],
+      currentTranscript: ''
     };
-
-    // ----------- RENDER FUNCTIONS -----------
-    function renderSetup() {
-      return `
-        <div class="container">
-          <h1 class="text-2xl font-bold mb-4">Set up your profile</h1>
-          <input id="profileName" class="border p-2 mb-4 w-full" placeholder="Enter your name" />
-          <input id="profilePhoto" type="file" class="border p-2 mb-4 w-full" />
-          <button onclick="createProfile()" class="bg-blue-500 text-white py-2 px-4">Save Profile</button>
-        </div>
-      `;
+    let recognition = null;
+    let mediaRecorder = null;
+    let audioChunks = [];
+    let isCapturingCall = false;
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.onresult = (event) => {
+        const last = event.results.length - 1;
+        const text = event.results[last][0].transcript.toLowerCase().trim();
+        state.currentTranscript = text;
+        render();
+        handleVoiceCommand(text);
+      };
+      recognition.onerror = (event) => {
+        console.error('Speech recognition error:', event.error);
+        if (event.error === 'no-speech') {
+          setTimeout(() => { if (state.isListening) { try { recognition.start(); } catch(e) {} } }, 1000);
+        }
+      };
+      recognition.onend = () => { if (state.isListening) { try { recognition.start(); } catch(e) {} } };
     }
-
+    if (recognition && state.myProfile) { try { recognition.start(); } catch(e) {} }
+    function handleVoiceCommand(text) {
+      if (state.currentCall) {
+        const endingMatch = state.contacts.find(c => c.id === state.currentCall.id && c.endingCommand && text.includes(c.endingCommand.text.toLowerCase()));
+        if (endingMatch) { endCall(); return; }
+      }
+      if (state.incomingCall && state.settings.yesCommand) {
+        if (text.includes(state.settings.yesCommand.text.toLowerCase())) { acceptCall(); return; }
+      }
+      if (state.screen === 'contacts' && !state.currentCall && !isCapturingCall) {
+        for (const contact of state.contacts) {
+          if (contact.nameCommand && text.includes(contact.nameCommand.text.toLowerCase())) { startRecordingForCall(contact); return; }
+        }
+      }
+    }
+    async function startRecordingForCall(contact) {
+      try {
+        isCapturingCall = true;
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks = [];
+        mediaRecorder.ondataavailable = (event) => { if (event.data.size > 0) { audioChunks.push(event.data); } };
+        mediaRecorder.onstop = () => {
+          const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+          const audioUrl = URL.createObjectURL(audioBlob);
+          stream.getTracks().forEach(track => track.stop());
+          if (state.incomingCall && state.incomingCall.id === contact.id) {
+            state.incomingAudioQueue.push(audioUrl);
+            playNextInQueue();
+          } else {
+            initiateCall(contact, audioUrl);
+          }
+          isCapturingCall = false;
+        };
+        mediaRecorder.start();
+        setTimeout(() => { if (mediaRecorder && mediaRecorder.state === 'recording') { mediaRecorder.stop(); } }, 2500);
+      } catch (error) {
+        console.error('Recording error:', error);
+        alert('Could not access microphone: ' + error.message);
+        isCapturingCall = false;
+      }
+    }
+    function playNextInQueue() {
+      if (state.incomingAudioQueue.length > 0) {
+        const audioUrl = state.incomingAudioQueue.shift();
+        const audio = new Audio(audioUrl);
+        audio.play();
+        audio.onended = () => { if (state.incomingAudioQueue.length > 0) { setTimeout(() => playNextInQueue(), 500); } };
+      }
+    }
+    async function startTrainingRecording() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks = [];
+        mediaRecorder.ondataavailable = (event) => { if (event.data.size > 0) { audioChunks.push(event.data); } };
+        mediaRecorder.onstop = () => {
+          const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+          const audioUrl = URL.createObjectURL(audioBlob);
+          stream.getTracks().forEach(track => track.stop());
+          state.trainingRecordings.push({ url: audioUrl, text: state.currentTranscript });
+          render();
+        };
+        mediaRecorder.start();
+        render();
+      } catch (error) { alert('Could not access microphone: ' + error.message); }
+    }
+    function stopTrainingRecording() { if (mediaRecorder && mediaRecorder.state === 'recording') { mediaRecorder.stop(); } }
+    function saveTraining() {
+      if (state.trainingRecordings.length === 0) return;
+      const bestRecording = state.trainingRecordings[state.trainingRecordings.length - 1];
+      if (state.trainingMode === 'name') {
+        const contactIndex = state.contacts.findIndex(c => c.id === state.trainingContact.id);
+        state.contacts[contactIndex].nameCommand = bestRecording;
+        localStorage.setItem('iroh_contacts', JSON.stringify(state.contacts));
+      } else if (state.trainingMode === 'ending') {
+        const contactIndex = state.contacts.findIndex(c => c.id === state.trainingContact.id);
+        state.contacts[contactIndex].endingCommand = bestRecording;
+        localStorage.setItem('iroh_contacts', JSON.stringify(state.contacts));
+      } else if (state.trainingMode === 'yes') {
+        state.settings.yesCommand = bestRecording;
+        localStorage.setItem('iroh_settings', JSON.stringify(state.settings));
+      }
+      state.trainingMode = null;
+      state.trainingContact = null;
+      state.trainingRecordings = [];
+      state.screen = state.trainingMode === 'yes' ? 'settings' : 'contacts';
+      render();
+    }
+    function setupProfile(name, photoUrl) {
+      state.myProfile = { name, photo: photoUrl };
+      localStorage.setItem('iroh_profile', JSON.stringify(state.myProfile));
+      state.screen = 'contacts';
+      if (recognition) { try { recognition.start(); } catch(e) {} }
+      render();
+    }
+    function addContact(name, photoUrl) {
+      const newContact = { id: Date.now(), name: name, photo: photoUrl, nameCommand: null, endingCommand: null };
+      state.contacts.push(newContact);
+      localStorage.setItem('iroh_contacts', JSON.stringify(state.contacts));
+      state.showAddContact = false;
+      state.trainingMode = 'name';
+      state.trainingContact = newContact;
+      state.trainingRecordings = [];
+      state.screen = 'training';
+      render();
+    }
+    function removeContact(id) { state.contacts = state.contacts.filter(c => c.id !== id); localStorage.setItem('iroh_contacts', JSON.stringify(state.contacts)); render(); }
+    function initiateCall(contact, notificationAudio) { state.currentCall = contact; state.screen = 'call'; state.isSpeakerOn = true; render(); }
+    function simulateIncomingCall(contact) {
+      state.incomingCall = contact;
+      state.incomingAudioQueue = [];
+      state.screen = 'incoming';
+      const utterance = new SpeechSynthesisUtterance(state.myProfile.name);
+      utterance.rate = 0.9;
+      speechSynthesis.speak(utterance);
+      render();
+    }
+    function acceptCall() { state.currentCall = state.incomingCall; state.incomingCall = null; state.incomingAudioQueue = []; state.screen = 'call'; state.isSpeakerOn = true; render(); }
+    function declineCall() { state.incomingCall = null; state.incomingAudioQueue = []; state.screen = 'contacts'; render(); }
+    function endCall() { state.currentCall = null; state.screen = 'contacts'; state.isMuted = false; state.isSpeakerOn = true; render(); }
+    function toggleSetting(key) { state.settings[key] = !state.settings[key]; localStorage.setItem('iroh_settings', JSON.stringify(state.settings)); render(); }
+    function handleImageUpload(inputId, callback) {
+      const input = document.getElementById(inputId);
+      const file = input.files[0];
+      if (file) { const reader = new FileReader(); reader.onload = (e) => callback(e.target.result); reader.readAsDataURL(file); }
+    }
+    function renderSetup() { return '<div class="min-h-screen flex items-center justify-center p-6 bg-yellow-400"><div class="bauhaus-card bg-white p-8 max-w-md w-full"><h1 class="bauhaus-title text-6xl text-center mb-8">iroH</h1><p class="text-center mb-6 text-gray-700">Set up your profile to start</p><input type="text" id="profileName" placeholder="Your Name" class="w-full p-4 border-3 border-black mb-4 text-lg"/><div class="mb-6"><label class="bauhaus-btn bg-red-500 text-white p-4 block text-center cursor-pointer mb-2">Upload Photo<input type="file" id="profilePhoto" accept="image/*" class="hidden"/></label><div id="photoPreview" class="text-center text-sm text-gray-600"></div></div><button onclick="createProfile()" class="bauhaus-btn bg-blue-600 text-white p-4 w-full" style="box-shadow: 6px 6px 0px #000;">Create Profile</button></div></div>'; }
     function renderContacts() {
-      const contactList = state.contacts.map(contact => `
-        <li class="p-2 border-b">
-          ${contact.name} 
-          <button onclick="removeContact(${contact.id})" class="text-red-500">Remove</button>
-        </li>
-      `).join('');
-      return `
-        <div class="container">
-          <h1 class="text-2xl font-bold mb-4">Your Contacts</h1>
-          <ul class="mb-4">${contactList || '<p>No contacts yet.</p>'}</ul>
-          <button onclick="addContactPrompt()" class="bg-green-500 text-white py-2 px-4">Add Contact</button>
-        </div>
-      `;
+      let html = '<div class="min-h-screen bg-yellow-400 p-4"><div class="max-w-md mx-auto"><div class="flex items-center justify-between mb-8"><h1 class="bauhaus-title text-5xl">iroH</h1><button onclick="state.screen=\'settings\'; render();" class="bauhaus-btn bg-white p-3" style="box-shadow: 4px 4px 0px #000;">⚙️</button></div>';
+      if (state.myProfile) {
+        html += '<div class="bauhaus-card bg-white p-4 mb-6"><div class="flex items-center gap-4">';
+        if (state.myProfile.photo) { html += '<img src="' + state.myProfile.photo + '" class="w-16 h-16 geometric-circle border-3 border-black"/>'; } else { html += '<div class="w-16 h-16 geometric-circle bg-red-500 border-3 border-black"></div>'; }
+        html += '<div><p class="text-sm font-bold uppercase">Your Profile</p><p class="text-xl font-bold">' + state.myProfile.name + '</p></div></div></div>';
+      }
+      html += '<div class="bauhaus-card bg-white p-4 mb-4"><div class="flex items-center justify-between"><span class="font-bold uppercase text-sm">Always Listening</span><div class="w-3 h-3 bg-green-500 rounded-full recording-pulse"></div></div>';
+      if (state.currentTranscript) { html += '<div class="mt-2 p-2 bg-gray-100 text-xs border-2 border-black">"' + state.currentTranscript + '"</div>'; }
+      html += '</div>';
+      html += '<div class="flex items-center justify-between mb-4"><h2 class="bauhaus-title text-2xl">VIP Contacts</h2><button onclick="state.showAddContact = true; render();" class="bauhaus-btn bg-red-500 text-white p-3" style="box-shadow: 4px 4px 0px #000;">➕</button></div>';
+      if (state.contacts.length === 0) { html += '<div class="bauhaus-card bg-white p-8 text-center"><p class="font-bold mb-2">No contacts yet</p><p class="text-sm text-gray-600">Add someone special</p></div>'; } else {
+        html += '<div class="space-y-4">';
+        state.contacts.forEach(contact => {
+          html += '<div class="bauhaus-card bg-white p-4"><div class="flex items-center justify-between mb-3"><div class="flex items-center gap-3">';
+          if (contact.photo) { html += '<img src="' + contact.photo + '" class="w-12 h-12 geometric-circle border-3 border-black"/>'; } else { html += '<div class="w-12 h-12 geometric-circle bg-blue-500 border-3 border-black"></div>'; }
+          html += '<div><p class="font-bold text-lg">' + contact.name + '</p>';
+          if (contact.nameCommand) { html += '<p class="text-xs text-green-600">✓ Trained: "' + contact.nameCommand.text + '"</p>'; } else { html += '<p class="text-xs text-red-600">⚠ Not trained</p>'; }
+          html += '</div></div><button onclick="removeContact(' + contact.id + ')" class="bauhaus-btn bg-red-500 text-white p-2 text-sm" style="box-shadow: 2px 2px 0px #000;">❌</button></div>';
+          html += '<div class="grid grid-cols-2 gap-2">';
+          html += '<button onclick=\'startTrainingFor(' + JSON.stringify(contact) + ', "name")\' class="bauhaus-btn ' + (contact.nameCommand ? 'bg-blue-200' : 'bg-blue-500 text-white') + ' p-2 text-xs" style="box-shadow: 2px 2px 0px #000;">' + (contact.nameCommand ? '🔄 Retrain Name' : '🎤 Train Name') + '</button>';
+          html += '<button onclick=\'startTrainingFor(' + JSON.stringify(contact) + ', "ending")\' class="bauhaus-btn ' + (contact.endingCommand ? 'bg-green-200' : 'bg-green-500 text-white') + ' p-2 text-xs" style="box-shadow: 2px 2px 0px #000;">' + (contact.endingCommand ? '🔄 Retrain End' : '🎤 Train End') + '</button>';
+          html += '</div><button onclick=\'simulateIncomingCall(' + JSON.stringify(contact) + ')\' class="bauhaus-btn bg-yellow-300 p-2 text-xs w-full mt-2" style="box-shadow: 2px 2px 0px #000;">📲 Test Call</button></div>';
+        });
+        html += '</div>';
+      }
+      html += '</div></div>';
+      if (state.showAddContact) { html += '<div class="fixed inset-0 bg-black/80 flex items-center justify-center p-6 z-50"><div class="bauhaus-card bg-white p-6 max-w-sm w-full"><h2 class="bauhaus-title text-3xl mb-4">Add Contact</h2><input type="text" id="contactName" placeholder="Contact Name" class="w-full p-3 border-3 border-black mb-4"/><label class="bauhaus-btn bg-blue-500 text-white p-3 block text-center cursor-pointer mb-4">Upload Photo<input type="file" id="contactPhoto" accept="image/*" class="hidden"/></label><div class="flex gap-2"><button onclick="state.showAddContact = false; render();" class="bauhaus-btn bg-gray-300 p-3 flex-1" style="box-shadow: 3px 3px 0px #000;">Cancel</button><button onclick="saveNewContact()" class="bauhaus-btn bg-red-500 text-white p-3 flex-1" style="box-shadow: 3px 3px 0px #000;">Add</button></div></div></div>'; }
+      return html;
     }
-
-    function renderAddContact() {
-      return `
-        <div class="container">
-          <h1 class="text-2xl font-bold mb-4">Add New Contact</h1>
-          <input id="contactName" class="border p-2 mb-4 w-full" placeholder="Enter contact's name" />
-          <input id="contactPhoto" type="file" class="border p-2 mb-4 w-full" />
-          <button onclick="saveNewContact()" class="bg-blue-500 text-white py-2 px-4">Save</button>
-        </div>
-      `;
+    function renderTraining() {
+      const isRecording = mediaRecorder && mediaRecorder.state === 'recording';
+      const trainingType = state.trainingMode === 'name' ? 'Name' : state.trainingMode === 'ending' ? 'Ending Phrase' : 'Yes Command';
+      const instruction = state.trainingMode === 'name' ? 'Say how you pronounce "' + state.trainingContact.name + '"' : state.trainingMode === 'ending' ? 'Say your ending phrase (e.g., "love you")' : 'Say "yes" as you naturally would';
+      let html = '<div class="min-h-screen bg-red-500 p-6 flex items-center justify-center"><div class="bauhaus-card bg-white p-8 max-w-md w-full"><h2 class="bauhaus-title text-3xl mb-2">Train ' + trainingType + '</h2>';
+      if (state.trainingContact) { html += '<p class="text-lg mb-6">For: ' + state.trainingContact.name + '</p>'; }
+      html += '<div class="bauhaus-card bg-yellow-100 p-4 mb-6"><p class="font-bold mb-2">Instructions:</p><p class="text-sm">' + instruction + '</p><p class="text-xs mt-2 text-gray-600">Record 2-3 times for best results</p></div>';
+      html += '<div class="text-center mb-6"><button onclick="' + (isRecording ? 'stopTrainingRecording()' : 'startTrainingRecording()') + '" class="bauhaus-btn ' + (isRecording ? 'bg-red-600 recording-pulse' : 'bg-blue-600') + ' text-white p-6 text-2xl w-32 h-32 rounded-full mx-auto" style="box-shadow: 8px 8px 0px #000;">' + (isRecording ? '⏹️' : '🎤') + '</button><p class="mt-4 font-bold">' + (isRecording ? 'Recording...' : 'Tap to Record') + '</p>';
+      if (state.currentTranscript && isRecording) { html += '<p class="text-sm mt-2 text-gray-700">"' + state.currentTranscript + '"</p>'; }
+      html += '</div>';
+      if (state.trainingRecordings.length > 0) {
+        html += '<div class="bauhaus-card bg-green-100 p-4 mb-6"><p class="font-bold mb-2">✓ ' + state.trainingRecordings.length + ' Recording(s)</p>';
+        state.trainingRecordings.forEach((rec, i) => { html += '<div class="flex items-center justify-between py-2 border-b border-black/20"><span class="text-sm">' + (i + 1) + '. "' + rec.text + '"</span><button onclick="new Audio(\'' + rec.url + '\').play()" class="bauhaus-btn bg-blue-500 text-white px-3 py-1 text-xs" style="box-shadow: 2px 2px 0px #000;">▶️</button></div>'; });
+        html += '</div>';
+      }
+      html += '<div class="flex gap-2"><button onclick="state.trainingMode=null; state.trainingContact=null; state.trainingRecordings=[]; state.screen=\'contacts\'; render();" class="bauhaus-btn bg-gray-300 p-3 flex-1" style="box-shadow: 4px 4px 0px #000;">Cancel</button><button onclick="saveTraining()" ' + (state.trainingRecordings.length === 0 ? 'disabled' : '') + ' class="bauhaus-btn bg-green-500 text-white p-3 flex-1 disabled:opacity-50" style="box-shadow: 4px 4px 0px #000;">Save</button></div></div></div>';
+      return html;
     }
-
+    function renderIncoming() {
+      let html = '<div class="min-h-screen bg-blue-600 flex items-center justify-center p-6"><div class="text-center max-w-sm text-white"><div class="bauhaus-card bg-white text-black p-8 mb-8">';
+      if (state.incomingCall.photo) { html += '<img src="' + state.incomingCall.photo + '" class="w-32 h-32 mx-auto geometric-circle border-4 border-black mb-4 recording-pulse"/>'; } else { html += '<div class="w-32 h-32 mx-auto geometric-circle bg-yellow-400 border-4 border-black mb-4 recording-pulse"></div>'; }
+      html += '<h2 class="bauhaus-title text-4xl mb-2">' + state.incomingCall.name + '</h2><p class="text-xl">is calling...</p></div>';
+      html += '<div class="bauhaus-card bg-white text-black p-4 mb-6"><p class="font-bold">Say "yes" to answer</p>';
+      if (state.currentTranscript) { html += '<p class="text-sm mt-2 text-gray-600">"' + state.currentTranscript + '"</p>'; }
+      html += '</div><div class="flex gap-4 justify-center"><button onclick="declineCall()" class="bauhaus-btn bg-red-500 text-white p-6 text-3xl w-20 h-20 rounded-full" style="box-shadow: 6px 6px 0px #000;">❌</button><button onclick="acceptCall()" class="bauhaus-btn bg-green-500 text-white p-6 text-3xl w-20 h-20 rounded-full" style="box-shadow: 6px 6px 0px #000;">✅</button></div></div></div>';
+      return html;
+    }
+    function renderCall() {
+      const endPhrase = state.currentCall.endingCommand ? state.currentCall.endingCommand.text : 'ending phrase';
+      let html = '<div class="min-h-screen bg-green-500 flex flex-col items-center justify-between p-6"><div class="text-center mt-16"><div class="bauhaus-card bg-white text-black p-8">';
+      if (state.currentCall.photo) { html += '<img src="' + state.currentCall.photo + '" class="w-32 h-32 mx-auto geometric-circle border-4 border-black mb-4"/>'; } else { html += '<div class="w-32 h-32 mx-auto geometric-circle bg-yellow-400 border-4 border-black mb-4"></div>'; }
+      html += '<h2 class="bauhaus-title text-4xl mb-2">' + state.currentCall.name + '</h2><p class="text-xl font-bold text-green-600">Connected</p></div></div>';
+      html += '<div class="w-full max-w-sm"><div class="bauhaus-card bg-white p-4 mb-6 text-center"><p class="text-sm font-bold mb-1">Say "' + endPhrase + '" to end</p>';
+      if (state.currentTranscript) { html += '<p class="text-xs text-gray-600 mt-2">"' + state.currentTranscript + '"</p>'; }
+      html += '</div><div class="flex gap-4 justify-center mb-6"><button onclick="state.isMuted = !state.isMuted; render();" class="bauhaus-btn ' + (state.isMuted ? 'bg-red-500' : 'bg-white') + ' p-6 text-3xl w-16 h-16" style="box-shadow: 4px 4px 0px #000;">' + (state.isMuted ? '🔇' : '🎤') + '</button><button onclick="state.isSpeakerOn = !state.isSpeakerOn; render();" class="bauhaus-btn ' + (state.isSpeakerOn ? 'bg-white' : 'bg-gray-300') + ' p-6 text-3xl w-16 h-16" style="box-shadow: 4px 4px 0px #000;">' + (state.isSpeakerOn ? '🔊' : '🔈') + '</button></div>';
+      html += '<button onclick="endCall()" class="bauhaus-btn bg-red-600 text-white p-4 w-full text-xl font-bold" style="box-shadow: 6px 6px 0px #000;">❌ END CALL</button></div></div>';
+      return html;
+    }
+    function renderSettings() {
+      let html = '<div class="min-h-screen bg-yellow-400 p-6"><div class="max-w-md mx-auto"><div class="flex items-center mb-8"><button onclick="state.screen=\'contacts\'; render();" class="bauhaus-btn bg-white p-3 mr-4" style="box-shadow: 3px 3px 0px #000;">⬅️</button><h1 class="bauhaus-title text-4xl">Settings</h1></div>';
+      html += '<div class="space-y-4"><div class="bauhaus-card bg-white p-4"><div class="flex items-center justify-between mb-2"><div><p class="font-bold">Notify on Silent</p><p class="text-sm text-gray-600">Hear calls when phone is silent</p></div><button onclick="toggleSetting(\'notifyOnSilent\')" class="w-16 h-8 ' + (state.settings.notifyOnSilent ? 'bg-green-500' : 'bg-gray-400') + ' border-3 border-black relative"><div class="w-6 h-6 bg-white border-3 border-black absolute top-0.5 transition-all ' + (state.settings.notifyOnSilent ? 'right-0.5' : 'left-0.5') + '"></div></button></div></div>';
+      html += '<div class="bauhaus-card bg-white p-4"><div class="flex items-center justify-between"><div class="flex-1"><p class="font-bold mb-1">"Yes" Command</p><p class="text-sm text-gray-600 mb-2">Train how you say "yes" to accept calls</p>';
+      if (state.settings.yesCommand) { html += '<p class="text-xs text-green-600">✓ Trained: "' + state.settings.yesCommand.text + '"</p>'; } else { html += '<p class="text-xs text-red-600">⚠ Not trained yet</p>'; }
+      html += '</div><button onclick="startTrainingFor(null, \'yes\')" class="bauhaus-btn ' + (state.settings.yesCommand ? 'bg-blue-200' : 'bg-blue-500 text-white') + ' p-3" style="box-shadow: 3px 3px 0px #000;">🎤</button></div></div>';
+      html += '<div class="bauhaus-card bg-white p-4"><p class="font-bold mb-2">About iroH</p><p class="text-sm text-gray-700 mb-2">Voice-first calling for your VIPs</p><p class="text-xs text-gray-500">Version 2.0 - Bauhaus Edition</p></div></div></div></div>';
+      return html;
+    }
     function render() {
       const app = document.getElementById('app');
       let html = '';
       switch (state.screen) {
-        case 'setup': 
-          html = renderSetup(); 
-          break;
-        case 'contacts': 
-          html = renderContacts(); 
-          break;
-        case 'add-contact': 
-          html = renderAddContact(); 
-          break;
+        case 'setup': html = renderSetup(); break;
+        case 'contacts': html = renderContacts(); break;
+        case 'training': html = renderTraining(); break;
+        case 'incoming': html = renderIncoming(); break;
+        case 'call': html = renderCall(); break;
+        case 'settings': html = renderSettings(); break;
       }
       app.innerHTML = html;
+      setTimeout(() => {
+        const profilePhoto = document.getElementById('profilePhoto');
+        if (profilePhoto) { profilePhoto.onchange = () => handleImageUpload('profilePhoto', (url) => { document.getElementById('photoPreview').innerHTML = '✓ Photo selected'; }); }
+        const contactPhoto = document.getElementById('contactPhoto');
+        if (contactPhoto) { contactPhoto.onchange = () => handleImageUpload('contactPhoto', () => {}); }
+      }, 0);
     }
-
-    // ----------- EVENT HANDLERS -----------
-    function createProfile() {
+    window.createProfile = function() {
       const name = document.getElementById('profileName').value;
       const photoInput = document.getElementById('profilePhoto');
-      
-      if (!name) {
-        alert('Please enter your name!');
-        return;
-      }
-
-      let photo = null;
-      if (photoInput.files.length > 0) {
-        photo = URL.createObjectURL(photoInput.files[0]);
-      }
-
-      state.myProfile = { name, photo };
-      state.screen = 'contacts'; // Switch to the contacts view
-      render();
-    }
-
-    function removeContact(id) {
-      state.contacts = state.contacts.filter(contact => contact.id !== id);
-      render();
-    }
-
-    function addContactPrompt() {
-      state.screen = 'add-contact';
-      render();
-    }
-
-    function saveNewContact() {
+      if (!name) { alert('Please enter your name'); return; }
+      if (photoInput.files[0]) { handleImageUpload('profilePhoto', (url) => setupProfile(name, url)); } else { setupProfile(name, null); }
+    };
+    window.saveNewContact = function() {
       const name = document.getElementById('contactName').value;
       const photoInput = document.getElementById('contactPhoto');
-      if (!name) {
-        alert('Please provide a contact name!');
-        return;
-      }
-
-      const id = Date.now();
-      const photo = photoInput.files.length > 0 ? URL.createObjectURL(photoInput.files[0]) : null;
-      state.contacts.push({ id, name, photo });
-      state.screen = 'contacts'; // Go back to contacts view
-      render();
-    }
-
-    // ----------- LOAD INITIAL SCREEN -----------
+      if (!name) { alert('Please enter contact name'); return; }
+      if (photoInput.files[0]) { handleImageUpload('contactPhoto', (url) => addContact(name, url)); } else { addContact(name, null); }
+    };
+    window.startTrainingFor = function(contact, mode) { state.trainingMode = mode; state.trainingContact = contact; state.trainingRecordings = []; state.screen = 'training'; render(); };
+    window.handleVoiceCommand = handleVoiceCommand;
+    window.removeContact = removeContact;
+    window.simulateIncomingCall = simulateIncomingCall;
+    window.acceptCall = acceptCall;
+    window.declineCall = declineCall;
+    window.endCall = endCall;
+    window.toggleSetting = toggleSetting;
+    window.startTrainingRecording = startTrainingRecording;
+    window.stopTrainingRecording = stopTrainingRecording;
+    window.saveTraining = saveTraining;
     render();
   </script>
 </body>
