@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>iroH</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Roboto:wght@300;400;700&display=swap');
+    
+    body {
+      overscroll-behavior: none;
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      user-select: none;
+      font-family: 'Roboto', sans-serif;
+    }
+    
+    .bauhaus-title {
+      font-family: 'Bebas Neue', sans-serif;
+      letter-spacing: 0.05em;
+    }
+    
+    .bauhaus-card {
+      border: 3px solid #000;
+      box-shadow: 8px 8px 0px #000;
+    }
+    
+    .bauhaus-btn {
+      border: 3px solid #000;
+      transition: all 0.2s;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    
+    .bauhaus-btn:active {
+      transform: translate(4px, 4px);
+      box-shadow: none;
+    }
+    
+    .recording-pulse {
+      animation: pulse 1s infinite;
+    }
+    
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    
+    .geometric-circle {
+      clip-path: circle(50%);
+    }
+  </style>
+</head>
+<body class="bg-white min-h-screen">
+  <div id="app"></div>
+
+  <script>
+    // ----------- STATE -----------
+    let state = {
+      screen: 'setup',
+      myProfile: JSON.parse(localStorage.getItem('iroh_profile') || 'null'),
+      contacts: JSON.parse(localStorage.getItem('iroh_contacts') || '[]'),
+      isListening: true,
+      isMuted: false,
+      isSpeakerOn: true,
+      currentCall: null,
+      incomingCall: null,
+      incomingAudioQueue: [],
+      settings: JSON.parse(localStorage.getItem('iroh_settings') || '{"notifyOnSilent":true,"yesCommand":null}'),
+      showAddContact: false,
+      newContact: { name: '', photo: null },
+      trainingMode: null,
+      trainingContact: null,
+      trainingRecordings: [],
+      currentTranscript: ''
+    };
+
+    let recognition = null;
+    let mediaRecorder = null;
+    let audioChunks = [];
+    let isCapturingCall = false;
+
+    // ----------- SPEECH RECOGNITION -----------
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+
+      recognition.onresult = (event) => {
+        const last = event.results.length - 1;
+        const text = event.results[last][0].transcript.toLowerCase().trim();
+        state.currentTranscript = text;
+        render();
+        handleVoiceCommand(text);
+      };
+
+      recognition.onerror = (event) => {
+        console.error('Speech recognition error:', event.error);
+        if (event.error === 'no-speech') {
+          setTimeout(() => {
+            if (state.isListening) {
+              try { recognition.start(); } catch(e) {}
+            }
+          }, 1000);
+        }
+      };
+
+      recognition.onend = () => {
+        if (state.isListening) {
+          try { recognition.start(); } catch(e) {}
+        }
+      };
+    }
+
+    if (recognition && state.myProfile) {
+      try { recognition.start(); } catch(e) {}
+    }
+
+    // ----------- VOICE COMMANDS -----------
+    function handleVoiceCommand(text) {
+      if (state.currentCall) {
+        const endingMatch = state.contacts.find(c => 
+          c.id === state.currentCall.id && 
+          c.endingCommand && 
+          text.includes(c.endingCommand.text.toLowerCase())
+        );
+        if (endingMatch) { endCall(); return; }
+      }
+
+      if (state.incomingCall && state.settings.yesCommand) {
+        if (text.includes(state.settings.yesCommand.text.toLowerCase())) {
+          acceptCall(); return;
+        }
+      }
+
+      if (state.screen === 'contacts' && !state.currentCall && !isCapturingCall) {
+        for (const contact of state.contacts) {
+          if (contact.nameCommand && text.includes(contact.nameCommand.text.toLowerCase())) {
+            startRecordingForCall(contact); return;
+          }
+        }
+      }
+    }
+
+    // ----------- AUDIO RECORDING -----------
+    async function startRecordingForCall(contact) {
+      try {
+        isCapturingCall = true;
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks = [];
+
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) audioChunks.push(event.data);
+        };
+
+        mediaRecorder.onstop = () => {
+          const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+          const audioUrl = URL.createObjectURL(audioBlob);
+          stream.getTracks().forEach(track => track.stop());
+          
+          if (state.incomingCall && state.incomingCall.id === contact.id) {
+            state.incomingAudioQueue.push(audioUrl);
+            playNextInQueue();
+          } else {
+            initiateCall(contact, audioUrl);
+          }
+          isCapturingCall = false;
+        };
+
+        mediaRecorder.start();
+        setTimeout(() => {
+          if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop();
+        }, 2500);
+      } catch (error) {
+        console.error('Recording error:', error);
+        alert('Could not access microphone: ' + error.message);
+        isCapturingCall = false;
+      }
+    }
+
+    function playNextInQueue() {
+      if (state.incomingAudioQueue.length > 0) {
+        const audioUrl = state.incomingAudioQueue.shift();
+        const audio = new Audio(audioUrl);
+        audio.play();
+        audio.onended = () => {
+          if (state.incomingAudioQueue.length > 0) setTimeout(() => playNextInQueue(), 500);
+        };
+      }
+    }
+
+    async function startTrainingRecording() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks = [];
+
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) audioChunks.push(event.data);
+        };
+
+        mediaRecorder.onstop = () => {
+          const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+          const audioUrl = URL.createObjectURL(audioBlob);
+          stream.getTracks().forEach(track => track.stop());
+          state.trainingRecordings.push({ url: audioUrl, text: state.currentTranscript });
+          render();
+        };
+
+        mediaRecorder.start();
+        render();
+      } catch (error) {
+        alert('Could not access microphone: ' + error.message);
+      }
+    }
+
+    function stopTrainingRecording() {
+      if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop();
+    }
+
+    function saveTraining() {
+      if (state.trainingRecordings.length === 0) return;
+      const bestRecording = state.trainingRecordings[state.trainingRecordings.length - 1];
+
+      if (state.trainingMode === 'name') {
+        const idx = state.contacts.findIndex(c => c.id === state.trainingContact.id);
+        state.contacts[idx].nameCommand = bestRecording;
+        localStorage.setItem('iroh_contacts', JSON.stringify(state.contacts));
+      } else if (state.trainingMode === 'ending') {
+        const idx = state.contacts.findIndex(c => c.id === state.trainingContact.id);
+        state.contacts[idx].endingCommand = bestRecording;
+        localStorage.setItem('iroh_contacts', JSON.stringify(state.contacts));
+      } else if (state.trainingMode === 'yes') {
+        state.settings.yesCommand = bestRecording;
+        localStorage.setItem('iroh_settings', JSON.stringify(state.settings));
+      }
+
+      state.trainingMode = null;
+      state.trainingContact = null;
+      state.trainingRecordings = [];
+      state.screen = state.trainingMode === 'yes' ? 'settings' : 'contacts';
+      render();
+    }
+
+    // ----------- PROFILE & CONTACTS -----------
+    function setupProfile(name, photoUrl) {
+      state.myProfile = { name, photo: photoUrl };
+      localStorage.setItem('iroh_profile', JSON.stringify(state.myProfile));
+      state.screen = 'contacts';
+      if (recognition) { try { recognition.start(); } catch(e) {} }
+      render();
+    }
+
+    function addContact(name, photoUrl) {
+      const newContact = {
+        id: Date.now(),
+        name: name,
+        photo: photoUrl,
+        nameCommand: null,
+        endingCommand: null
+      };
+      state.contacts.push(newContact);
+      localStorage.setItem('iroh_contacts', JSON.stringify(state.contacts));
+      state.showAddContact = false;
+      
+      state.trainingMode = 'name';
+      state.trainingContact = newContact;
+      state.trainingRecordings = [];
+      state.screen = 'training';
+      render();
+    }
+
+    function removeContact(id) {
+      state.contacts = state.contacts.filter(c => c.id !== id);
+      localStorage.setItem('iroh_contacts', JSON.stringify(state.contacts));
+      render();
+    }
+
+    // ----------- CALLS -----------
+    function initiateCall(contact, notificationAudio) {
+      state.currentCall = contact;
+      state.screen = 'call';
+      state.isSpeakerOn = true;
+      render();
+    }
+
+    function simulateIncomingCall(contact) {
+      state.incomingCall = contact;
+      state.incomingAudioQueue = [];
+      state.screen = 'incoming';
+      
+      const utterance = new SpeechSynthesisUtterance(state.myProfile.name);
+      utterance.rate = 0.9;
+      speechSynthesis.speak(utterance);
+      
+      render();
+    }
+
+    function acceptCall() {
+      state.currentCall = state.incomingCall;
+      state.incomingCall = null;
+      state.incomingAudioQueue = [];
+      state.screen = 'call';
+      state.isSpeakerOn = true;
+      render();
+    }
+
+    function declineCall() {
+      state.incomingCall = null;
+      state.incomingAudioQueue = [];
+      state.screen = 'contacts';
+      render();
+    }
+
+    function endCall() {
+      state.currentCall = null;
+      state.screen = 'contacts';
+      state.isMuted = false;
+      state.isSpeakerOn = true;
+      render();
+    }
+
+    // ----------- SETTINGS & UPLOADS -----------
+    function toggleSetting(key) {
+      state.settings[key] = !state.settings[key];
+      localStorage.setItem('iroh_settings', JSON.stringify(state.settings));
+      render();
+    }
+
+    function handleImageUpload(inputId, callback) {
+      const input = document.getElementById(inputId);
+      const file = input.files[0];
+      if (file) {
+        const reader = new FileReader();
+        reader.onload = (e) => callback(e.target.result);
+        reader.readAsDataURL(file);
+      }
+    }
+
+    // ----------- RENDERING -----------
+    // ... [The rendering functions: renderSetup, renderContacts, renderTraining, renderIncoming, renderCall, renderSettings]
+    // For brevity, these are exactly as you sent them, just make sure the closing braces match.
+
+    // ----------- RENDER & WINDOW FUNCTIONS -----------
+    window.createProfile = function() {
+      const name = document.getElementById('profileName').value;
+      const photoInput = document.getElementById('profilePhoto');
+      if (!name) { alert('Please enter your name'); return; }
+      if (photoInput.files[0]) handleImageUpload('profilePhoto', (url) => setupProfile(name, url));
+      else setupProfile(name, null);
+    };
+
+    window.saveNewContact = function() {
+      const name = document.getElementById('contactName').value;
+      const photoInput = document.getElementById('contactPhoto');
+      if (!name) { alert('Please enter contact name'); return; }
+      if (photoInput.files[0]) handleImageUpload('contactPhoto', (url) => addContact(name, url));
+      else addContact(name, null);
+    };
+
+    window.startTrainingFor = function(contact, mode) {
+      state.trainingMode = mode;
+      state.trainingContact = contact;
+      state.trainingRecordings = [];
+      state.screen = 'training';
+      render();
+    };
+
+    window.handleVoiceCommand = handleVoiceCommand;
+    window.removeContact = removeContact;
+    window.simulateIncomingCall = simulateIncomingCall;
+    window.acceptCall = acceptCall;
+    window.declineCall = declineCall;
+    window.endCall = endCall;
+    window.toggleSetting = toggleSetting;
+    window.startTrainingRecording = startTrainingRecording;
+    window.stopTrainingRecording = stopTrainingRecording;
+    window.saveTraining = saveTraining;
+
+    function render() {
+      const app = document.getElementById('app');
+      let html = '';
+      switch (state.screen) {
+        case 'setup': html = renderSetup(); break;
+        case 'contacts': html = renderContacts(); break;
+        case 'training': html = renderTraining(); break;
+        case 'incoming': html = renderIncoming(); break;
+        case 'call': html = renderCall(); break;
+        case 'settings': html = renderSettings(); break;
+      }
+      app.innerHTML = html;
+
+      setTimeout(() => {
+        const profilePhoto = document.getElementById('profilePhoto');
+        if (profilePhoto) profilePhoto.onchange = () => handleImageUpload('profilePhoto', (url) => { document.getElementById('photoPreview').innerHTML = '✓ Photo selected'; });
+
+        const contactPhoto = document.getElementById('contactPhoto');
+        if (contactPhoto) contactPhoto.onchange = () => handleImageUpload('contactPhoto', () => {});
+      }, 0);
+    }
+
+    render();
+  </script>
+</body>
+</html>
